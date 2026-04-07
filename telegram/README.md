@@ -1,4 +1,4 @@
-# Telegram Plugin
+# Telegram Plugin (Unofficial)
 
 Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 
@@ -20,6 +20,8 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 
 ## Installation
 
+### 1. Add as MCP server
+
 ```bash
 claude mcp add telegram-unofficial \
   -e TELEGRAM_BOT_TOKEN=your_token \
@@ -28,7 +30,24 @@ claude mcp add telegram-unofficial \
   -- bun run --cwd $PLUGIN_DIR --shell=bun --silent start
 ```
 
-Or use the Claude Code plugin manager and point to this directory.
+### 2. Enable channel on startup
+
+```bash
+claude --channels telegram-unofficial
+```
+
+Or add to your shell profile/aliases:
+
+```bash
+alias claude-tg='claude --channels telegram-unofficial'
+```
+
+### 3. Pair your account
+
+1. Open Telegram and send any message to your bot
+2. The bot will reply with a pairing code
+3. In Claude Code, run: `/telegram:access pair <code>`
+4. Lock down access: `/telegram:access policy allowlist`
 
 ## Configuration
 
@@ -38,18 +57,12 @@ Or use the Claude Code plugin manager and point to this directory.
 | `TELEGRAM_STATE_DIR` | Directory for access control and state (default: `~/.claude/channels/telegram`) |
 | `TELEGRAM_ACCESS_MODE` | `pairing` (default), `allowlist`, or `disabled` |
 
-## Usage
+## Upgrading
 
-After installation, Claude Code will automatically use this plugin for Telegram messages. The Markdown formatting will be automatically converted to Telegram-friendly HTML.
-
-### Manual Reply Format
-
-When using the reply tool, the default format is `markdown`, so you can write:
-
-```
-**Bold Text**
-- Item 1
-- Item 2
+```bash
+cd /path/to/claude-plugins/telegram
+git pull
+bun install
 ```
 
-And it will render as properly formatted HTML in Telegram.
+Then restart Claude Code.
