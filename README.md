@@ -6,7 +6,7 @@ Unofficial plugin marketplace for Claude Code.
 
 | Plugin | Description |
 |--------|-------------|
-| [telegram](./telegram/) | Telegram channel with Markdown to HTML conversion |
+| [telegram-unofficial](./telegram-unofficial/) | Telegram channel with Markdown to HTML conversion |
 
 ## Installation
 

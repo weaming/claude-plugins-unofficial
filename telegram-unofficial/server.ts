@@ -76,7 +76,7 @@ const telegramRenderer = {
   },
 
   hr(): string {
-    return '-------------------\n\n'
+    return '\n-------------------\n\n'
   },
 
   list(this: any, token: any): string {
@@ -90,7 +90,7 @@ const telegramRenderer = {
     listStack.pop()
     listDepth--
 
-    return ('\n' + body).replace(/\n\n+/g, '\n')
+    return ('\n' + body + '\n').replace(/\n{3,}/g, '\n\n')
   },
 
   listitem(this: any, item: any, index: number): string {

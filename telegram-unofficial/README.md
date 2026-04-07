@@ -10,13 +10,13 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 
 ### Formatting Examples
 
-| Markdown | Telegram Output |
-|----------|-----------------|
-| `**bold**` | **bold** |
-| `*italic*` | *italic* |
-| `` `code` `` | `code` |
-| `- item` | ● item |
-| `- nested` | ○ nested |
+| Markdown     | Telegram Output |
+| ------------ | --------------- |
+| `**bold**`   | **bold**        |
+| `*italic*`   | _italic_        |
+| `` `code` `` | `code`          |
+| `- item`     | ● item          |
+| `- nested`   | ○ nested        |
 
 ## Installation
 
@@ -25,18 +25,18 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 /reload-plugins
 ```
 
-## Configuration
-
-```bash
-/telegram-unofficial:configure <token>
-```
-
 ## Enable Channel
 
 Restart Claude Code with:
 
 ```bash
 claude --dangerously-load-development-channels plugin:telegram-unofficial@weaming-plugins
+```
+
+## Configuration
+
+```bash
+/telegram-unofficial:configure <token>
 ```
 
 ## Pair Your Account
