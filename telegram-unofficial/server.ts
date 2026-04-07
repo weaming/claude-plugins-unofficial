@@ -70,9 +70,9 @@ const telegramRenderer = {
   heading(this: any, { tokens }: any): string {
     const content = this.parser.parseInline(tokens)
     if (content.startsWith('<b>') && content.endsWith('</b>')) {
-      return `\n${content}\n\n`
+      return `\n\n${content}\n\n`
     }
-    return `\n<b>${content}</b>\n\n`
+    return `\n\n<b>${content}</b>\n\n`
   },
 
   hr(): string {
