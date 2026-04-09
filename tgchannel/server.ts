@@ -4,7 +4,7 @@
  *
  * Self-contained MCP server with full access control: pairing, allowlists,
  * group support with mention-triggering. State lives in
- * ~/.claude/channels/tgchannel/access.json — managed by the /tgchannel:access skill.
+ * ~/.claude/channels/tgchannel/ — managed by the /tgchannel:access skill.
  *
  * Telegram's Bot API has no history or search. Reply-only tools.
  */
@@ -19,10 +19,47 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, createWriteStream, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { Marked } from 'marked'
+
+// --- State directory ---
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'tgchannel')
+const ACCESS_FILE = join(STATE_DIR, 'access.json')
+const APPROVED_DIR = join(STATE_DIR, 'approved')
+const INBOX_DIR = join(STATE_DIR, 'inbox')
+const ENV_FILE = join(STATE_DIR, '.env')
+const ERR_LOG_FILE = join(STATE_DIR, 'err.log')
+
+// --- File logger (err.log) ---
+let _logStream: ReturnType<typeof createWriteStream> | null = null
+function _getLogStream() {
+  if (!_logStream) {
+    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true })
+    _logStream = createWriteStream(ERR_LOG_FILE, { flags: 'a' })
+  }
+  return _logStream
+}
+
+function log(...args: string[]) {
+  const msg = args.join(' ') + '\n'
+  process.stderr.write(msg)
+  try {
+    _getLogStream().write(msg)
+  } catch {}
+}
+
+// Load env from STATE_DIR/.env (for bot token, etc.)
+if (existsSync(ENV_FILE)) {
+  try {
+    chmodSync(ENV_FILE, 0o600)
+    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const m = line.match(/^(\w+)=(.*)$/)
+      if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+    }
+  } catch {}
+}
 
 // --- Markdown to Telegram HTML Converter ---
 
@@ -160,7 +197,7 @@ function convertMarkdownToTelegramHtml(markdown: string): string {
     const finalHtml = html.replace(/<br\s*\/?>/gi, '\n')
     return finalHtml.replace(/\n{3,}/g, '\n\n').trim()
   } catch (e) {
-    process.stderr.write(`Markdown conversion error: ${e}\n`)
+    log(`Markdown conversion error: ${e}\n`)
     return markdown
   } finally {
     listDepth = previousDepth
@@ -169,34 +206,17 @@ function convertMarkdownToTelegramHtml(markdown: string): string {
   }
 }
 
-const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'tgchannel')
-const ACCESS_FILE = join(STATE_DIR, 'access.json')
-const APPROVED_DIR = join(STATE_DIR, 'approved')
-const ENV_FILE = join(STATE_DIR, '.env')
-
-// Load ~/.claude/channels/tgchannel/.env into process.env. Real env wins.
-// Plugin-spawned servers don't get an env block — this is where the token lives.
-try {
-  // Token is a credential — lock to owner. No-op on Windows (would need ACLs).
-  chmodSync(ENV_FILE, 0o600)
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const m = line.match(/^(\w+)=(.*)$/)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
-  }
-} catch {}
-
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
 
 if (!TOKEN) {
-  process.stderr.write(
+  log(
     `telegram channel: TELEGRAM_BOT_TOKEN required\n` +
     `  set in ${ENV_FILE}\n` +
     `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n`,
   )
   process.exit(1)
 }
-const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 // --- Leader Election (multi-instance protection) ---
 const PID_DIR = join(homedir(), '.config', 'mcp')
@@ -262,16 +282,16 @@ async function elect(): Promise<boolean> {
 
 async function standby(): Promise<void> {
   // Stay connected via stdio but do NOT poll Telegram — only one instance polls
-  process.stderr.write('telegram channel: standby mode (another instance is polling)\n')
+  log('telegram channel: standby mode (another instance is polling)\n')
 
   // Periodically check if leader is still alive
   while (true) {
     await sleep(LEADER_CHECK_INTERVAL_MS)
     const current = readPidFile()
     if (!current || !isPidAlive(current.pid)) {
-      process.stderr.write('telegram channel: leader gone, attempting election\n')
+      log('telegram channel: leader gone, attempting election\n')
       if (await elect()) {
-        process.stderr.write('telegram channel: won election, becoming leader\n')
+        log('telegram channel: won election, becoming leader\n')
         return // Caller should start polling
       }
       // Lost election, continue standby
@@ -282,10 +302,10 @@ async function standby(): Promise<void> {
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
 process.on('unhandledRejection', err => {
-  process.stderr.write(`telegram channel: unhandled rejection: ${err}\n`)
+  log(`telegram channel: unhandled rejection: ${err}\n`)
 })
 process.on('uncaughtException', err => {
-  process.stderr.write(`telegram channel: uncaught exception: ${err}\n`)
+  log(`telegram channel: uncaught exception: ${err}\n`)
 })
 
 // Permission-reply spec from anthropics/claude-cli-internal
@@ -375,7 +395,7 @@ function readAccessFile(): Access {
     try {
       renameSync(ACCESS_FILE, `${ACCESS_FILE}.corrupt-${Date.now()}`)
     } catch {}
-    process.stderr.write(`telegram channel: access.json is corrupt, moved aside. Starting fresh.\n`)
+    log(`telegram channel: access.json is corrupt, moved aside. Starting fresh.\n`)
     return defaultAccess()
   }
 }
@@ -387,7 +407,7 @@ const BOOT_ACCESS: Access | null = STATIC
   ? (() => {
       const a = readAccessFile()
       if (a.dmPolicy === 'pairing') {
-        process.stderr.write(
+        log(
           'telegram channel: static mode — dmPolicy "pairing" downgraded to "allowlist"\n',
         )
         a.dmPolicy = 'allowlist'
@@ -539,7 +559,7 @@ function checkApprovals(): void {
     void bot.api.sendMessage(senderId, "Paired! Say hi to Claude.").then(
       () => rmSync(file, { force: true }),
       err => {
-        process.stderr.write(`telegram channel: failed to send approval confirm: ${err}\n`)
+        log(`telegram channel: failed to send approval confirm: ${err}\n`)
         // Remove anyway — don't loop on a broken send.
         rmSync(file, { force: true })
       },
@@ -634,7 +654,7 @@ mcp.setNotificationHandler(
       .text('❌ Deny', `perm:deny:${request_id}`)
     for (const chat_id of access.allowFrom) {
       void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
-        process.stderr.write(`permission_request send to ${chat_id} failed: ${e}\n`)
+        log(`permission_request send to ${chat_id} failed: ${e}\n`)
       })
     }
   },
@@ -890,13 +910,13 @@ let isLeader = false
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
-  process.stderr.write('telegram channel: shutting down\n')
+  log('telegram channel: shutting down\n')
   // If we are the leader, remove PID file so a standby instance can take over
   if (isLeader) {
     const current = readPidFile()
     if (current && current.pid === process.pid) {
       removePidFile()
-      process.stderr.write('telegram channel: removed PID file\n')
+      log('telegram channel: removed PID file\n')
     }
   }
   // bot.stop() signals the poll loop to end; the current getUpdates request
@@ -1048,7 +1068,7 @@ bot.on('message:photo', async ctx => {
       writeFileSync(path, buf)
       return path
     } catch (err) {
-      process.stderr.write(`telegram channel: photo download failed: ${err}\n`)
+      log(`telegram channel: photo download failed: ${err}\n`)
       return undefined
     }
   })
@@ -1221,14 +1241,14 @@ async function handleInbound(
       },
     },
   }).catch(err => {
-    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
+    log(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
   })
 }
 
 // Without this, any throw in a message handler stops polling permanently
 // (grammy's default error handler calls bot.stop() and rethrows).
 bot.catch(err => {
-  process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`)
+  log(`telegram channel: handler error (polling continues): ${err.error}\n`)
 })
 
 // Leader election: check if another instance is polling before starting
@@ -1237,19 +1257,19 @@ void (async () => {
   const existing = readPidFile()
   if (existing && isPidAlive(existing.pid)) {
     // Another instance is leader — enter standby mode
-    process.stderr.write('telegram channel: leader already running (PID ' + existing.pid + '), entering standby\n')
+    log('telegram channel: leader already running (PID ' + existing.pid + '), entering standby\n')
     await standby()
     // standby() only returns if we became leader
-    process.stderr.write('telegram channel: became leader\n')
+    log('telegram channel: became leader\n')
   } else {
     // No leader or leader dead — try to become leader
     if (!(await elect())) {
       // Lost election — enter standby
-      process.stderr.write('telegram channel: lost election, entering standby\n')
+      log('telegram channel: lost election, entering standby\n')
       await standby()
-      process.stderr.write('telegram channel: became leader\n')
+      log('telegram channel: became leader\n')
     } else {
-      process.stderr.write('telegram channel: elected leader (PID ' + process.pid + ')\n')
+      log('telegram channel: elected leader (PID ' + process.pid + ')\n')
     }
   }
 
@@ -1261,7 +1281,7 @@ void (async () => {
       await bot.start({
         onStart: info => {
           botUsername = info.username
-          process.stderr.write(`telegram channel: polling as @${info.username}\n`)
+          log(`telegram channel: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
             [
               { command: 'start', description: 'Welcome and setup guide' },
@@ -1276,7 +1296,7 @@ void (async () => {
     } catch (err) {
       if (err instanceof GrammyError && err.error_code === 409) {
         const delay = Math.min(1000 * attempt, 15000)
-        process.stderr.write(
+        log(
           `telegram channel: 409 Conflict after becoming leader, retrying in ${delay / 1000}s\n`,
         )
         await new Promise(r => setTimeout(r, delay))
@@ -1284,7 +1304,7 @@ void (async () => {
       }
       // bot.stop() mid-setup rejects with grammy's "Aborted delay" — expected, not an error.
       if (err instanceof Error && err.message === 'Aborted delay') return
-      process.stderr.write(`telegram channel: polling failed: ${err}\n`)
+      log(`telegram channel: polling failed: ${err}\n`)
       return
     }
   }
