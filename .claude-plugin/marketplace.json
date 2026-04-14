@@ -9,7 +9,7 @@
     {
       "name": "tgchannel",
       "description": "Telegram channel plugin for Claude Code with Markdown to HTML conversion",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "source": "./tgchannel",
       "category": "communication",
       "homepage": "https://github.com/weaming/claude-plugins-unofficial"

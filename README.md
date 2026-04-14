@@ -15,7 +15,7 @@ Unofficial plugin marketplace for Claude Code.
 /plugin marketplace add weaming/claude-plugins-unofficial
 
 # Install a plugin
-/plugin install telegram@weaming-plugins
+/plugin install tgchannel@weaming-plugins
 ```
 
 ## Plugin Structure

@@ -1,15 +1,20 @@
 {
-  "name": "claude-channel-telegram",
-  "version": "0.1.0",
-  "license": "Apache-2.0",
+  "name": "tgchannel",
+  "version": "2.0.1",
+  "license": "MIT",
   "type": "module",
-  "bin": "./manager/index.ts",
+  "bin": {
+    "tgchannel-server": "./server/index.ts"
+  },
   "scripts": {
-    "start": "bun install --no-summary && bun manager/index.ts"
+    "start": "bun server/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "grammy": "^1.21.0",
-    "marked": "^17.0.6"
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0"
   }
 }

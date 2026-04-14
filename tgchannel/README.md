@@ -26,17 +26,16 @@ Telegram ←→ Center Manager ←→ Claude Client(s)
               Unix Socket
 ```
 
-## Startup
-
-### 1. Start Center Manager (must run first)
+## Installation
 
 ```bash
-cd tgchannel/server
-bun install
-bun index.ts
+bun build --compile --minify --target bun --sourcemap=none \
+    --outfile ~/.bun/bin/tgchannel-server server/index.ts
 ```
 
-### 2. Start Claude CLI
+Then run `tgchannel-server` from anywhere.
+
+## Connect Claude
 
 Restart Claude Code with the plugin loaded:
 
@@ -49,8 +48,3 @@ Multiple Claude CLI instances can connect. Only the **active instance** receives
 ## Switching Instances
 
 In Telegram, use `/switch` to list all connected instances and tap a button to switch.
-
-## Commands
-
-- `/start` - Welcome message
-- `/switch` - Switch between Claude instances
