@@ -1,8 +1,8 @@
-# tgchannel 多实例切换方案
+# tgchannel 多实例架构与实现设计
 
 ## 背景
 
-当前 tgchannel 插件每个 Claude CLI 实例独立连接 Telegram，同一时刻只有一个实例能作为 leader 接收消息。需要改为：
+当前实现由 Center Manager 统一连接 Telegram，并同时管理两类 Claude 实例：传统 MCP channel 实例和 Agent SDK 实例。任一时刻只有活跃实例接收 Telegram 消息。
 
 - **中心管理器**：一个独立进程连接 Telegram Bot，路由消息到指定 Claude CLI
 - **多个 Claude CLI 实例**：各自运行，通过 IPC（如 unix socket / HTTP）与中心管理器通信
@@ -22,14 +22,15 @@ my-plugin/
 ├── skills/                         # prompt 注入，无运行时
 │   └── my-skill/SKILL.md
 ├── .mcp.json                       # MCP 服务器声明
-└── server.ts                       # 实际运行进程（通过 stdio 与 Claude 通信）
+└── server.ts                       # MCP 实际运行进程（通过 stdio 与 Claude 通信）
 ```
 
 ### 核心通信机制
 
-1. **MCP 服务器（stdio）**：`.mcp.json` 声明的服务器作为子进程启动，通过 stdin/stdout 用 JSON-RPC 通信
-2. **Channel 通知**：`notifications/claude/channel` 将外部事件注入会话，作为 `<channel source="telegram" ...>` 标签可见
-3. **工具调用**：Claude 调用 `mcp__plugin_tgchannel_tgchannel__reply` 等工具，通过 stdio 发送 `CallToolRequest`
+1. **MCP 服务器（stdio）**：MCP 服务器作为子进程启动，通过 stdin/stdout 使用 JSON-RPC 通信。
+2. **传统 MCP 实例**：通过 `notifications/claude/channel` 将外部事件注入 Claude 会话，消息可带 channel 元信息。
+3. **Agent SDK 实例**：Agent SDK 直接调用 Claude Code `query()`；Telegram 正文作为普通 user prompt，`chat_id` 等元信息放入 system prompt 末尾。
+4. **工具调用**：两类实例都通过 Telegram MCP 工具发送回复、反应、编辑消息和下载附件。
 
 ### 关键文件
 
@@ -37,7 +38,9 @@ my-plugin/
 | ------------- | ------------------------------------- |
 | `.mcp.json`   | 声明如何启动 MCP 服务器               |
 | `plugin.json` | 插件元数据、声明 channels 能力        |
-| `server.ts`   | MCP 服务器 + Telegram Bot，长时间运行 |
+| `server/index.ts` | Center Manager、Telegram Bot 和 Unix socket 服务 |
+| `client/mcp.ts` | channel 模式或 Agent SDK tools-only 模式的 Telegram MCP |
+| `client/agent-runner.ts` | Agent SDK query、会话和控制 IPC |
 
 ---
 
@@ -84,7 +87,7 @@ my-plugin/
                         │
                   ┌─────┴─────┐
                   │  Center   │  ← 独立进程，管理 Telegram 连接
-                  │  Manager  │    (bun/Node MCP server)
+                  │  Manager  │    (compiled Bun server)
                   └─────┬─────┘
                         │
          ┌──────────────┼──────────────┐
@@ -98,16 +101,15 @@ my-plugin/
 
 ### 组件
 
-1. **Center Manager** (`manager/`)
-   - 独立运行的 MCP 服务器，连接 Telegram Bot
+1. **Center Manager** (`server/`)
+   - 独立运行的 Telegram Bot 进程
    - 维护"当前活跃 Claude 实例"状态
    - 通过 unix socket 与各 Claude 实例通信
-   - 暴露 MCP 工具：`switch_claude`, `list_instances`, `send_to_claude`
+   - 通过 Unix socket 提供实例注册、切换、消息转发、会话重置和状态查询
 
-2. **Center MCP Server** (`.mcp.json` 注册)
-   - 各 Claude CLI 内运行，作为该实例的"通道"
-   - 接收 Center Manager 的指令（如切换当前实例）
-   - 暴露工具：`reply`（转发给 Center Manager）
+2. **Claude 客户端**
+   - MCP 实例通过 `notifications/claude/channel` 接收消息
+   - Agent SDK 实例通过 `agent-runner.ts` 调用 SDK，并复用 tools-only Telegram MCP
 
 3. **Telegram UI 按钮**
    - 每次交互后更新消息/发送新消息，显示所有实例按钮
@@ -122,19 +124,20 @@ my-plugin/
 
 ```
 tgchannel/
-├── manager/
-│   ├── index.ts      # 主程序：MCP server + Telegram bot
+├── .claude-plugin/
+│   └── plugin.json      # 插件元数据
+├── .mcp.json            # 传统 MCP channel 声明
+├── server/
+│   ├── index.ts      # Center Manager：Telegram bot + Unix socket
 │   ├── session-store.ts      # 管理已注册的 Claude 实例
-│   ├── socket-server.ts      # Unix socket 服务器
-│   └── .mcp.json
+│   └── socket-server.ts      # Unix socket 消息类型
 ├── client/
-│   ├── mcp.ts      # 每个 Claude CLI 内运行的插件
-│   ├── socket-client.ts      # Unix socket 客户端
-│   └── .mcp.json
-├── tgchannel.skills/
-│   └── switch/
-│       └── SKILL.md          # /tgchannel:switch 技能
-└── plugin.json
+│   ├── mcp.ts             # channel 或 tools-only Telegram MCP 工具
+│   ├── agent-runner.ts    # Agent SDK 会话、状态和控制 IPC
+│   ├── fish-launcher.ts   # Fish profile 解析与 Claude wrapper
+│   ├── my-claude.ts       # Agent SDK CLI
+│   └── reset-session.ts   # reset_session IPC CLI
+└── package.json
 ```
 
 ### 4.2 实例注册机制
@@ -146,6 +149,7 @@ tgchannel/
 {
   type: 'register',
   sessionId: 'uuid-xxx',
+  kind: 'mcp' | 'agent-sdk',
   pid: process.pid,
   label: 'Claude A',           // 可配置，默认 "Claude {pid}"
   lastMessage: 'hello buddy',   // 最近一条用户消息的前 N 字
@@ -160,8 +164,11 @@ Center Manager 维护实例列表，按最后消息时间排序。
 1. Telegram 消息到达 Center Manager
 2. Center Manager 检查"当前活跃实例"
 3. 消息转发到活跃实例的 unix socket
-4. 该实例的 MCP server 发送 `notifications/claude/channel` 给 Claude
-5. Claude 回复 → 调用 `reply` 工具 → socket 传 Center Manager → Telegram
+4. 根据实例类型处理：
+   - MCP：MCP server 发送 `notifications/claude/channel`
+   - Agent SDK：Runner 将正文直接作为 `query()` 的 user prompt，并把 Telegram 元信息追加到 system prompt 末尾
+5. Claude 调用 Telegram MCP 的 `reply` 工具
+6. MCP server → Unix socket → Center Manager → Telegram
 
 ### 4.4 切换机制
 
@@ -173,14 +180,14 @@ Center Manager 维护实例列表，按最后消息时间排序。
 
 **方式二：命令**
 
-- `/tgchannel:switch <name>` 在终端执行
-- 通过 Center Manager 的管理接口（unix socket）切换
+- Telegram `/switch` 显示实例列表并通过 Inline Keyboard 切换
+- `tgchannel-reset` 通过 Unix socket 重置指定 Agent SDK 实例
 
-### 4.5 Claude CLI 判断是否回复到 TG
+### 4.5 活跃实例与回复路由
 
 关键问题：多个 Claude 实例都收到同一份消息，如何避免重复回复？
 
-**当前设计**：只有"活跃实例"会收到消息通知，非活跃实例不注入 channel 事件。
+**当前设计**：只有"活跃实例"会收到 forward 消息，非活跃实例不注入 channel 事件，也不会调用 Agent SDK。
 
 但需要解决：Center Manager 如何知道哪个实例是"活跃"的？
 
@@ -227,6 +234,18 @@ Center Manager 维护实例列表，按最后消息时间排序。
 }
 ```
 
+**控制消息**
+
+```json
+{
+  "type": "status",
+  "sessionId": "agent-xxx",
+  "requestId": "uuid-xxx"
+}
+```
+
+`reset_session` 使用相同格式但 type 为 `reset_session`。Agent SDK Runner 对 `reset_session` 返回新会话状态，对 `status` 返回模型、PWD、PID、session ID 和累计 token。Telegram `/clear` 和 `/status` 都通过这条控制链路工作。
+
 **回复消息**
 
 ```json
@@ -240,23 +259,22 @@ Center Manager 维护实例列表，按最后消息时间排序。
 
 ---
 
-## 五、实现计划
+## 五、实现任务
 
 ### Phase 1: Center Manager 核心
 
-1. 创建 `manager/index.ts`
-   - MCP 服务器（声明 `claude/channel` capabilities）
+1. 创建 `server/index.ts`
    - Telegram long polling
    - 管理实例注册表（sessionId → socket 连接）
    - 处理 `callback_query` 切换活跃实例
    - 消息路由到当前活跃实例
 
-2. 创建 `manager/session-store.ts`
+2. 创建 `server/session-store.ts`
    - 维护活跃实例
    - 实例列表（label, lastMessage, sessionId, pid）
    - 按最后消息时间排序
 
-3. 创建 `manager/socket-server.ts`
+3. 创建 `server/socket-server.ts`
    - Unix socket 监听
    - 处理 register/switch/forward/reply 消息
 
@@ -265,12 +283,12 @@ Center Manager 维护实例列表，按最后消息时间排序。
 4. 创建 `client/mcp.ts`
    - 连接 Center Manager unix socket
    - 发送注册消息
-   - 接收 forward 消息并转发 MCP 通知
+   - 接收 forward 消息并转发 MCP 通知，或交给 Agent SDK Runner
    - 接收 switch 消息更新状态
    - 处理 `reply` 工具调用，发送回复到 socket
 
-5. 创建 `client/.mcp.json`
-   - 声明 MCP 服务器
+5. 配置根目录 `.mcp.json`
+   - 当前由根目录 `.mcp.json` 声明传统 MCP 服务器
 
 ### Phase 3: 整合与 UI
 
@@ -278,8 +296,15 @@ Center Manager 维护实例列表，按最后消息时间排序。
    - 显示实例切换按钮
    - Inline keyboard 样式
 
-7. 创建技能 `/tgchannel:switch`
-   - 手动切换实例
+7. 增加 Telegram 管理命令
+   - `/switch`、`/status`、`/clear`
+
+### Phase 4: Agent SDK 扩展
+
+8. `my-claude <fish command>` 启动 Agent SDK Runner
+9. 启动时解析 Fish function，提取真实 Claude 可执行文件、参数和环境
+10. 每条消息调用 Agent SDK `query()`，通过 `resume` 继续 Runner 当前 session
+11. 通过 `reset_session`、`status` IPC 管理会话和状态
 
 ---
 
@@ -290,15 +315,16 @@ Center Manager 维护实例列表，按最后消息时间排序。
 | ✅ 新建   | `tgchannel/server/index.ts`         |
 | ✅ 新建   | `tgchannel/server/session-store.ts` |
 | ✅ 新建   | `tgchannel/server/socket-server.ts` |
-| ✅ 新建   | `tgchannel/server/.mcp.json`        |
-| ✅ 新建   | `tgchannel/server/package.json`     |
+| ✅ 新建   | `tgchannel/.mcp.json`               |
+| ✅ 新建   | `tgchannel/package.json`             |
 | ✅ 新建   | `tgchannel/client/mcp.ts`           |
-| ✅ 新建   | `tgchannel/client/socket-client.ts` |
-| ✅ 新建   | `tgchannel/client/.mcp.json`        |
-| ✅ 新建   | `tgchannel/skills/switch/SKILL.md`  |
-| ⏳ 待修改 | `tgchannel/plugin.json`             |
-| ⏳ 待完成 | 权限控制（access.json 检查）        |
-| ⏳ 待完成 | 集成测试                            |
+| ✅ 新建   | `tgchannel/client/agent-runner.ts` |
+| ✅ 新建   | `tgchannel/client/my-claude.ts` |
+| ✅ 新建   | `tgchannel/client/reset-session.ts` |
+| ✅ 新建   | `tgchannel/client/fish-launcher.ts` |
+| ✅ 已实现 | `tgchannel/.claude-plugin/plugin.json` |
+| ✅ 已实现 | 权限控制（access.json 检查）        |
+| ⏳ 待完成 | 完整 Telegram 集成测试              |
 
 ---
 
@@ -306,29 +332,31 @@ Center Manager 维护实例列表，按最后消息时间排序。
 
 ### 已完成
 
-1. **manager/**
+1. **server/**
    - `session-store.ts` - 实例注册、活跃管理
    - `socket-server.ts` - Unix socket 框架
    - `index.ts` - Telegram 连接、消息路由、按钮 UI、callback_query 处理
    - `.mcp.json` / `package.json` - 项目配置
 
 2. **client/**
-   - `socket-client.ts` - socket 客户端库
-   - `mcp.ts` - MCP 服务器，接收 center 转发，权限 relay
+   - `agent-runner.ts` - Agent SDK 会话、消息队列、status 和 reset_session IPC
+   - `fish-launcher.ts` - 加载用户 Fish 配置、解析 profile 并启动自定义命令
+   - `my-claude.ts` - Agent SDK 实例入口
+   - `reset-session.ts` - reset_session IPC 测试入口
+   - `mcp.ts` - 支持 channel 与 tools-only 两种模式
    - `.mcp.json` - 项目配置
 
-3. **skills/**
-   - `skills/switch/SKILL.md` - `/tgchannel:switch` 技能
+### 当前限制
 
-### 待完成
-
-1. 权限控制 - index.ts 需要检查 access.json（沿用原 server.ts 的 gate 逻辑）
-2. 集成测试
+1. `my-claude` 重启后不会自动恢复上一次 Runner 的 session ID；旧 session 文件仍保留，但需要显式恢复。
+2. Agent SDK 使用 `strictMcpConfig: true`，只加载显式提供的 tools-only `tgchannel` MCP，不加载其他 `.mcp.json` 或插件 MCP。
+3. `/status` 的 token 是当前 Runner 生命周期内累计值，不是历史 session 文件的全量统计。
+4. 完整 Telegram 集成测试仍待补充。
 
 ### 设计确认
 
 - **Center**: 单一实例运行，管理 Telegram 连接和所有客户端 socket
-- **Client**: 每个 Claude CLI 是"傻瓜客户端"，收到消息就转发给 Claude，Claude 回复全部发回 center
+- **Client**: MCP 客户端负责 channel 或工具转发；Agent SDK 客户端负责 query、session、状态和控制 IPC
 - **切换**: 用户在 TG 发 `/switch` → Center 回复实例列表 + Inline Buttons → 点击切换活跃实例
 - **消息路由**: 只有活跃实例收到 forward 通知；非活跃实例忽略；所有客户端的回复都会发回 center（center 校验是否是活跃实例）
 
@@ -336,11 +364,11 @@ Center Manager 维护实例列表，按最后消息时间排序。
 
 ## 八、验证方式
 
-1. 安装依赖：`cd tgchannel/server && bun install`
-2. 启动 Center Manager：`bun run index.ts`
-3. 启动 Claude CLI（配置使用 client/.mcp.json）
-4. 在 Telegram 发送消息，确认消息路由到当前活跃实例
-5. 点击按钮切换，确认消息路由变化
+1. 安装依赖：`cd tgchannel && bun install`
+2. 启动 Center Manager：`tgchannel-server`
+3. 启动传统实例：按正常方式启动 Claude，并加载 channel MCP
+4. 启动 Agent SDK 实例：`my-claude claude` 或 `my-claude claude-deepseek`
+5. 在 Telegram 使用 `/switch`、`/status`、`/clear` 验证实例管理
 
 ---
 
@@ -349,20 +377,32 @@ Center Manager 维护实例列表，按最后消息时间排序。
 ### Center Manager（需先启动）
 
 ```bash
-cd /Users/garden/src/claude-plugins-unofficial/tgchannel/server
+cd /Users/garden/src/claude-plugins-unofficial/tgchannel
 bun install
-bun run index.ts
+bun build --compile --minify --target bun --sourcemap=none \
+  --outfile ~/.bun/bin/tgchannel-server server/index.ts
 ```
 
-### Claude CLI（启动后再启动这个）
+### MCP Claude CLI
 
-需配置 `.mcp.json` 指向 `client/.mcp.json`，或者在 Claude Code 中启用该插件。
+按插件方式加载 channel MCP。
+
+### Agent SDK CLI
+
+```fish
+my-claude claude
+my-claude claude-deepseek
+my-claude claude-aliyun
+```
+
+Fish function 会在 Runner 启动时解析，实际 Claude 子进程在收到第一条 Telegram 消息时由 Agent SDK 启动。Agent SDK 使用 Claude Code 默认 system prompt，并加载 `user`、`project`、`local` 设置源及 `CLAUDE.md`；同时只加载显式配置的 tools-only `tgchannel` MCP。
 
 ---
 
 ## 更新记录
 
 - 2026-04-14：初稿，基于 plugin 架构和 channels 文档
-- 2026-04-14：完成 manager/ 和 client/ 目录结构和核心文件
+- 2026-04-14：完成 server/ 和 client/ 目录结构和核心文件
 - 2026-04-14：修复 NetSocket 类型，添加 switch skill
 - 2026-04-14：确认设计 - center 单实例，client 无状态，/switch 在 TG 内切换
+- 2026-08-06：完成 MCP 与 Agent SDK 双实例架构，加入 Fish profile、`/clear`、`/status` 和 token 统计

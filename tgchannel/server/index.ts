@@ -14,7 +14,7 @@ import { createServer, type Socket as NetSocket } from 'net'
 import { existsSync, mkdirSync, chmodSync, readFileSync, writeFileSync, unlinkSync, renameSync } from 'fs'
 import { join, extname } from 'path'
 import { homedir } from 'os'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { SessionStore, type Instance } from './session-store.js'
 import type { SocketMessage } from './socket-server.js'
 
@@ -44,7 +44,7 @@ mkdirSync(INBOX_DIR, { recursive: true, mode: 0o755 })
 mkdirSync(LOG_DIR, { recursive: true, mode: 0o755 })
 writeFileSync(PID_FILE, String(process.pid), { mode: 0o644 })
 
-function log(...args: string[]) {
+function log(...args: unknown[]) {
   const msg = new Date().toISOString() + ' ' + args.join(' ') + '\n'
   process.stderr.write(msg)
 }
@@ -718,6 +718,137 @@ activateTimer.unref()
 // --- Socket server ---
 const sockets = new Map<string, NetSocket>()
 const lastPongTime = new Map<string, number>()
+type ControlResultMessage = Extract<SocketMessage, { type: 'control_result' }>
+type PendingControlRequest = {
+  socket?: NetSocket
+  resolve?: (message: ControlResultMessage) => void
+}
+
+const pendingControlRequests = new Map<string, PendingControlRequest>()
+
+function requestAgentSessionReset(sessionId: string): Promise<ControlResultMessage> {
+  const requestId = randomUUID()
+  const target = store.getInstance(sessionId)
+  const targetSocket = sockets.get(sessionId)
+
+  if (!target || !targetSocket) {
+    return Promise.resolve({
+      type: 'control_result',
+      sessionId,
+      requestId,
+      command: 'reset_session',
+      ok: false,
+      error: '实例未连接',
+    })
+  }
+
+  if (target.kind !== 'agent-sdk') {
+    return Promise.resolve({
+      type: 'control_result',
+      sessionId,
+      requestId,
+      command: 'reset_session',
+      ok: false,
+      error: '当前实例不是 Agent SDK 实例',
+    })
+  }
+
+  return new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      if (!pendingControlRequests.delete(requestId)) return
+      resolve({
+        type: 'control_result',
+        sessionId,
+        requestId,
+        command: 'reset_session',
+        ok: false,
+        error: '等待 Agent SDK 重置回执超时',
+      })
+    }, 10000)
+    timeout.unref()
+
+    pendingControlRequests.set(requestId, { resolve })
+    targetSocket.write(JSON.stringify({
+      type: 'reset_session',
+      sessionId,
+      requestId,
+    }) + '\n', error => {
+      if (!error) return
+      clearTimeout(timeout)
+      pendingControlRequests.delete(requestId)
+      resolve({
+        type: 'control_result',
+        sessionId,
+        requestId,
+        command: 'reset_session',
+        ok: false,
+        error: `发送 reset_session 失败：${error.message}`,
+      })
+    })
+  })
+}
+
+function requestAgentStatus(sessionId: string): Promise<ControlResultMessage> {
+  const requestId = randomUUID()
+  const target = store.getInstance(sessionId)
+  const targetSocket = sockets.get(sessionId)
+
+  if (!target || !targetSocket) {
+    return Promise.resolve({
+      type: 'control_result',
+      sessionId,
+      requestId,
+      command: 'status',
+      ok: false,
+      error: '实例未连接',
+    })
+  }
+
+  if (target.kind !== 'agent-sdk') {
+    return Promise.resolve({
+      type: 'control_result',
+      sessionId,
+      requestId,
+      command: 'status',
+      ok: false,
+      error: '当前实例不是 Agent SDK 实例',
+    })
+  }
+
+  return new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      if (!pendingControlRequests.delete(requestId)) return
+      resolve({
+        type: 'control_result',
+        sessionId,
+        requestId,
+        command: 'status',
+        ok: false,
+        error: '等待 Agent SDK 状态回执超时',
+      })
+    }, 10000)
+    timeout.unref()
+
+    pendingControlRequests.set(requestId, { resolve })
+    targetSocket.write(JSON.stringify({
+      type: 'status',
+      sessionId,
+      requestId,
+    }) + '\n', error => {
+      if (!error) return
+      clearTimeout(timeout)
+      pendingControlRequests.delete(requestId)
+      resolve({
+        type: 'control_result',
+        sessionId,
+        requestId,
+        command: 'status',
+        ok: false,
+        error: `发送 status 失败：${error.message}`,
+      })
+    })
+  })
+}
 
 function broadcastToAll(msg: unknown, excludeSessionId?: string): void {
   const data = JSON.stringify(msg) + '\n'
@@ -786,10 +917,9 @@ async function handleSocketMessage(
 ): Promise<void> {
   switch (msg.type) {
     case 'register': {
-      // Reject "ghost" clients: channelEnabled is true only when the client
-      // detects that Claude was launched with --channels/--dangerously-load-development-channels
-      // containing "tgchannel" (via inspecting Claude's CLI args).
-      if (msg.channelEnabled !== true) {
+      const instanceKind = msg.kind ?? 'mcp'
+      const isMcpChannelReady = msg.channelEnabled === true
+      if (instanceKind === 'mcp' && !isMcpChannelReady) {
         log('register rejected (channel not ready):', msg.sessionId)
         socket.write(JSON.stringify({ type: 'rejected', reason: 'channel not ready' }) + '\n')
         break
@@ -800,6 +930,8 @@ async function handleSocketMessage(
         label: msg.label,
         lastMessage: msg.lastMessage,
         cwd: msg.cwd,
+        kind: instanceKind,
+        ...(msg.claudeSessionId ? { claudeSessionId: msg.claudeSessionId } : {}),
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
       }
@@ -821,6 +953,11 @@ async function handleSocketMessage(
     }
     case 'update_last_message': {
       store.updateLastMessage(msg.sessionId, msg.message)
+      broadcastToAll({ type: 'instances_updated', instances: store.getAllInstances() })
+      break
+    }
+    case 'update_session': {
+      store.updateClaudeSessionId(msg.sessionId, msg.claudeSessionId)
       broadcastToAll({ type: 'instances_updated', instances: store.getAllInstances() })
       break
     }
@@ -856,6 +993,86 @@ async function handleSocketMessage(
         type: 'active_result',
         activeSessionId: store.getActive(),
       }) + '\n')
+      break
+    }
+    case 'reset_session': {
+      const target = store.getInstance(msg.sessionId)
+      const targetSocket = sockets.get(msg.sessionId)
+      if (!target || !targetSocket) {
+        socket.write(JSON.stringify({
+          type: 'control_result',
+          sessionId: msg.sessionId,
+          requestId: msg.requestId,
+          command: 'reset_session',
+          ok: false,
+          error: 'instance is not connected',
+        }) + '\n')
+        break
+      }
+
+      if (target.kind !== 'agent-sdk') {
+        socket.write(JSON.stringify({
+          type: 'control_result',
+          sessionId: msg.sessionId,
+          requestId: msg.requestId,
+          command: 'reset_session',
+          ok: false,
+          error: 'reset_session is only supported by agent-sdk instances',
+        }) + '\n')
+        break
+      }
+
+      pendingControlRequests.set(msg.requestId, { socket })
+      targetSocket.write(JSON.stringify({
+        ...msg,
+        requesterSessionId: getSessionId() ?? undefined,
+      }) + '\n')
+      break
+    }
+    case 'status': {
+      const target = store.getInstance(msg.sessionId)
+      const targetSocket = sockets.get(msg.sessionId)
+      if (!target || !targetSocket) {
+        socket.write(JSON.stringify({
+          type: 'control_result',
+          sessionId: msg.sessionId,
+          requestId: msg.requestId,
+          command: 'status',
+          ok: false,
+          error: 'instance is not connected',
+        }) + '\n')
+        break
+      }
+
+      if (target.kind !== 'agent-sdk') {
+        socket.write(JSON.stringify({
+          type: 'control_result',
+          sessionId: msg.sessionId,
+          requestId: msg.requestId,
+          command: 'status',
+          ok: false,
+          error: 'status is only supported by agent-sdk instances',
+        }) + '\n')
+        break
+      }
+
+      pendingControlRequests.set(msg.requestId, { socket })
+      targetSocket.write(JSON.stringify({
+        ...msg,
+        requesterSessionId: getSessionId() ?? undefined,
+      }) + '\n')
+      break
+    }
+    case 'control_result': {
+      const pendingRequest = pendingControlRequests.get(msg.requestId)
+      pendingControlRequests.delete(msg.requestId)
+      if (pendingRequest?.resolve) {
+        pendingRequest.resolve(msg)
+        break
+      }
+      const requesterSocket = pendingRequest?.socket
+        ?? (msg.requesterSessionId ? sockets.get(msg.requesterSessionId) : socket)
+      requesterSocket?.write(JSON.stringify(msg) + '\n')
       break
     }
     case 'ping': {
@@ -1093,6 +1310,75 @@ bot.command('switch', async ctx => {
   })
 })
 
+bot.command('status', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  log('telegram command: /status from', ctx.from?.username ?? ctx.from?.id)
+
+  const activeSessionId = store.getActive()
+  const activeInstance = activeSessionId ? store.getInstance(activeSessionId) : undefined
+  if (!activeSessionId || !activeInstance) {
+    await ctx.reply('当前没有活跃的 Claude 实例。')
+    return
+  }
+
+  if (activeInstance.kind !== 'agent-sdk') {
+    await ctx.reply([
+      `实例：${displayName(activeInstance.label)}`,
+      '类型：MCP',
+      `PID：${activeInstance.pid}`,
+      `PWD：${activeInstance.cwd}`,
+      'Token：传统 MCP 实例不提供 Agent SDK token 统计。',
+    ].join('\n'))
+    return
+  }
+
+  const result = await requestAgentStatus(activeSessionId)
+  if (!result.ok) {
+    await ctx.reply(`获取 Agent SDK 状态失败：${result.error ?? '未知错误'}`)
+    return
+  }
+
+  const usage = result.usage ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  }
+  await ctx.reply([
+    `实例：${displayName(activeInstance.label)}`,
+    '类型：Agent SDK',
+    `PID：${result.pid ?? activeInstance.pid}`,
+    `PWD：${result.cwd ?? activeInstance.cwd}`,
+    `模型：${result.model ?? '尚未启动 Claude'}`,
+    `Session ID：${result.claudeSessionId ?? '尚未创建'}`,
+    'Token（当前 Runner 累计）：',
+    `  input：${usage.inputTokens.toLocaleString()}`,
+    `  output：${usage.outputTokens.toLocaleString()}`,
+    `  cache creation：${usage.cacheCreationInputTokens.toLocaleString()}`,
+    `  cache read：${usage.cacheReadInputTokens.toLocaleString()}`,
+  ].join('\n'))
+})
+
+bot.command('clear', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  log('telegram command: /clear from', ctx.from?.username ?? ctx.from?.id)
+  const activeSessionId = store.getActive()
+  const activeInstance = activeSessionId ? store.getInstance(activeSessionId) : undefined
+
+  if (!activeSessionId || !activeInstance) {
+    await ctx.reply('当前没有活跃的 Claude 实例。')
+    return
+  }
+
+  if (activeInstance.kind !== 'agent-sdk') {
+    await ctx.reply('当前活跃实例不是 Agent SDK，无法通过 Telegram /clear 重置。')
+    return
+  }
+
+  const result = await requestAgentSessionReset(activeSessionId)
+  await ctx.reply(result.ok ? 'Claude 会话已重置。' : `Claude 会话重置失败：${result.error ?? '未知错误'}`)
+})
+
 // --- General message handlers (run after commands) ---
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, {})
@@ -1142,7 +1428,8 @@ bot.on('message:voice', async ctx => {
 
 // --- Error handler ---
 bot.catch(err => {
-  const msg = err?.error?.message ?? String(err)
+  const botError = err as { error?: { message?: string } }
+  const msg = botError.error?.message ?? String(err)
   const isNet = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ENETUNREACH|SOCKET|HTTPError|fetch/i.test(msg)
   log('bot error' + (isNet ? ' [net]' : '') + ':', msg)
 })
@@ -1182,6 +1469,8 @@ void (async () => {
         bot.api.setMyCommands([
           { command: 'start', description: '欢迎信息' },
           { command: 'switch', description: '切换 Claude 实例' },
+          { command: 'status', description: '查看当前实例状态' },
+          { command: 'clear', description: '重置当前 Agent SDK 会话' },
         ], { scope: { type: 'all_private_chats' } }).catch(() => {})
       },
     })

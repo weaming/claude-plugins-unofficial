@@ -23,8 +23,9 @@ import { join } from 'path'
 
 // --- Config ---
 const BASE_DIR = join(homedir(), '.claude', 'channels', 'tgchannel')
-const SOCKET_PATH = join(BASE_DIR, 'center.sock')
-const LOG_DIR = join(BASE_DIR, 'logs')
+const SOCKET_PATH = process.env.TGCHANNEL_SOCKET_PATH ?? join(BASE_DIR, 'center.sock')
+const LOG_DIR = process.env.TGCHANNEL_LOG_DIR ?? join(BASE_DIR, 'logs')
+const toolsOnly = process.env.TGCHANNEL_MODE === 'tools'
 
 // Derive client ID from parent's cwd: /Users/garden/src/ai-box -> ai-box
 // Client ID format: client-{parentName}-{pid}, e.g. client-ai-box-12345
@@ -83,7 +84,7 @@ function detectChannelEnabled(): boolean {
 }
 
 // Determined once at startup — inspects Claude's CLI args
-const channelEnabled = detectChannelEnabled()
+const channelEnabled = toolsOnly ? false : detectChannelEnabled()
 
 // --- Ensure log dir exists ---
 mkdirSync(LOG_DIR, { recursive: true, mode: 0o755 })
@@ -99,14 +100,16 @@ function log(...args: unknown[]): void {
 
 // --- MCP Server ---
 const mcp = new Server(
-  { name: 'tgclient', version: '1.0.0' },
+  { name: toolsOnly ? 'tgclient-tools' : 'tgclient', version: '1.0.0' },
   {
     capabilities: {
       tools: {},
-      experimental: {
-        'claude/channel': {},
-        'claude/channel/permission': {},
-      },
+      ...(toolsOnly ? {} : {
+        experimental: {
+          'claude/channel': {},
+          'claude/channel/permission': {},
+        },
+      }),
     },
     instructions: [
       'CRITICAL: The user is on Telegram and CANNOT see your terminal output. ALL responses must use the reply tool — your normal text response never reaches them.',
@@ -131,7 +134,7 @@ const mcp = new Server(
 
 // --- Socket client ---
 let socket: NetSocket | null = null
-let sessionId: string | null = clientId
+let sessionId: string | null = process.env.TGCHANNEL_SESSION_ID ?? clientId
 let activeSessionId: string | null = null
 let isConnected = false
 
@@ -315,6 +318,7 @@ async function register(channelEnabled: boolean): Promise<void> {
   send({
     type: 'register',
     sessionId: clientId,
+    kind: 'mcp',
     pid,
     label,
     lastMessage: '',
@@ -327,7 +331,9 @@ async function register(channelEnabled: boolean): Promise<void> {
     log('client: MCP connection closed')
     isConnected = false
     stopHeartbeat()
-    send({ type: 'unregister', sessionId: sessionId! })
+    if (!toolsOnly) {
+      send({ type: 'unregister', sessionId: sessionId! })
+    }
   }
 }
 
@@ -495,31 +501,33 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 })
 
 // --- Permission relay ---
-mcp.setNotificationHandler(
-  z.object({
-    method: z.literal('notifications/claude/channel/permission_request'),
-    params: z.object({
-      request_id: z.string(),
-      tool_name: z.string(),
-      description: z.string(),
-      input_preview: z.string(),
+if (!toolsOnly) {
+  const notificationServer = mcp as any
+  notificationServer.setNotificationHandler(
+    z.object({
+      method: z.literal('notifications/claude/channel/permission_request'),
+      params: z.object({
+        request_id: z.string(),
+        tool_name: z.string(),
+        description: z.string(),
+        input_preview: z.string(),
+      }),
     }),
-  }),
-  async ({ params }) => {
-    // Forward to center manager
-    send({
-      type: 'permission_request',
-      request_id: params.request_id,
-      tool_name: params.tool_name,
-      description: params.description,
-      input_preview: params.input_preview,
-    })
-  },
-)
+    async ({ params }) => {
+      send({
+        type: 'permission_request',
+        request_id: params.request_id,
+        tool_name: params.tool_name,
+        description: params.description,
+        input_preview: params.input_preview,
+      })
+    },
+  )
+}
 
 // --- Start ---
 async function main() {
-  log('client: channel detected as', channelEnabled ? 'enabled' : 'disabled')
+  log('client: mode', toolsOnly ? 'tools' : 'channel', 'channel=', channelEnabled ? 'enabled' : 'disabled')
 
   await connectSocket()
   // mcp.connect() initializes the stdio transport and waits for Claude's initialize request.
@@ -529,7 +537,9 @@ async function main() {
     log('client: MCP connect failed:', err)
     process.exit(1)
   }
-  await register(channelEnabled)
+  if (!toolsOnly) {
+    await register(channelEnabled)
+  }
   // Keep process alive
   await new Promise(() => {})
 }

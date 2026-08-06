@@ -3,12 +3,16 @@
  * Tracks all registered Claude instances and the active instance.
  */
 
+export type InstanceKind = 'mcp' | 'agent-sdk'
+
 export type Instance = {
   sessionId: string
+  kind: InstanceKind
   pid: number
   label: string
   lastMessage: string
   cwd: string
+  claudeSessionId?: string
   registeredAt: number
   lastActivityAt: number
 }
@@ -67,6 +71,18 @@ export class SessionStore {
     const inst = this.instances.get(sessionId)
     if (inst) {
       inst.lastMessage = msg
+      inst.lastActivityAt = Date.now()
+    }
+  }
+
+  updateClaudeSessionId(sessionId: string, claudeSessionId: string | null): void {
+    const inst = this.instances.get(sessionId)
+    if (inst) {
+      if (claudeSessionId) {
+        inst.claudeSessionId = claudeSessionId
+      } else {
+        delete inst.claudeSessionId
+      }
       inst.lastActivityAt = Date.now()
     }
   }

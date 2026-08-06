@@ -7,6 +7,9 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion and mul
 - **Markdown to HTML auto-conversion** - Messages are automatically formatted as Telegram-friendly HTML
 - **Nested list bullets** - `●` / `○` / `▪` for visual hierarchy
 - **Multi-instance support** - Connect multiple Claude CLI instances and switch between them via Telegram buttons
+- **Agent SDK instances** - Run `my-claude` instances alongside channel-based Claude CLI instances
+- **Fish command bridge** - Agent SDK instances can launch a user-defined Fish `claude` function
+- **Session reset IPC** - `tgchannel-reset` can reset an Agent SDK instance without restarting it
 
 ### Formatting Examples
 
@@ -24,22 +27,51 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion and mul
 Telegram ←→ Center Manager ←→ Claude Client(s)
                     ↑
               Unix Socket
+
+Center Manager tracks both `mcp` and `agent-sdk` instances. Agent SDK instances use the existing Telegram MCP tools for replies, reactions, edits, and attachments.
 ```
 
 ## Installation
 
-```bash
+Install dependencies first:
+
+```fish
+cd tgchannel
+bun install
+```
+
+Install the Center Manager as a standalone executable:
+
+```fish
 bun build --compile --minify --target bun --sourcemap=none \
     --outfile ~/.bun/bin/tgchannel-server server/index.ts
 ```
 
-Then run `tgchannel-server` from anywhere.
+Install the Agent SDK CLI entry points as source-backed launchers. `my-claude` needs access to the bundled `client/mcp.ts` file at runtime:
+
+```fish
+mkdir -p ~/.bun/bin
+ln -sf "$PWD/client/my-claude.ts" ~/.bun/bin/my-claude
+ln -sf "$PWD/client/reset-session.ts" ~/.bun/bin/tgchannel-reset
+```
+
+Make sure `~/.bun/bin` is in `PATH`. You can then run `tgchannel-server`, `my-claude`, and `tgchannel-reset` from anywhere.
+
+Start an Agent SDK instance with any Fish `claude` command or function:
+
+```fish
+my-claude claude
+my-claude claude-deepseek
+my-claude claude-aliyun
+```
+
+The Fish command is resolved when `my-claude` starts. Restart the instance after changing its function or environment settings.
 
 ## Connect Claude
 
 Restart Claude Code with the plugin loaded:
 
-```bash
+```fish
 claude --dangerously-load-development-channels plugin:tgchannel@weaming-plugins
 ```
 
@@ -48,3 +80,5 @@ Multiple Claude CLI instances can connect. Only the **active instance** receives
 ## Switching Instances
 
 In Telegram, use `/switch` to list all connected instances and tap a button to switch.
+Use `/status` to inspect the active instance, session, model, working directory, and Agent SDK token totals.
+Use `/clear` to reset the active Agent SDK session.
