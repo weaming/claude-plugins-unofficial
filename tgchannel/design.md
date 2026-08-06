@@ -30,7 +30,8 @@ my-plugin/
 1. **MCP 服务器（stdio）**：MCP 服务器作为子进程启动，通过 stdin/stdout 使用 JSON-RPC 通信。
 2. **传统 MCP 实例**：通过 `notifications/claude/channel` 将外部事件注入 Claude 会话，消息可带 channel 元信息。
 3. **Agent SDK 实例**：Agent SDK 直接调用 Claude Code `query()`；Telegram 正文作为普通 user prompt，`chat_id` 等元信息放入 system prompt 末尾。
-4. **工具调用**：两类实例都通过 Telegram MCP 工具发送回复、反应、编辑消息和下载附件。
+4. **回复格式**：Agent SDK Runner 将 query 的最终普通文本通过 Unix socket 发送给 Center Manager；Center Manager 负责 Markdown 到 Telegram HTML 的转换。
+5. **MCP 工具调用**：传统 MCP 实例仍通过 Telegram MCP 工具发送回复、反应、编辑消息和下载附件。
 
 ### 关键文件
 
@@ -39,7 +40,7 @@ my-plugin/
 | `.mcp.json`   | 声明如何启动 MCP 服务器               |
 | `plugin.json` | 插件元数据、声明 channels 能力        |
 | `server/index.ts` | Center Manager、Telegram Bot 和 Unix socket 服务 |
-| `client/mcp.ts` | channel 模式或 Agent SDK tools-only 模式的 Telegram MCP |
+| `client/mcp.ts` | 传统 channel 模式的 Telegram MCP |
 | `client/agent-runner.ts` | Agent SDK query、会话和控制 IPC |
 
 ---
@@ -109,7 +110,7 @@ my-plugin/
 
 2. **Claude 客户端**
    - MCP 实例通过 `notifications/claude/channel` 接收消息
-   - Agent SDK 实例通过 `agent-runner.ts` 调用 SDK，并复用 tools-only Telegram MCP
+   - Agent SDK 实例通过 `agent-runner.ts` 调用 SDK，并直接将最终文本发送到 Center Manager
 
 3. **Telegram UI 按钮**
    - 每次交互后更新消息/发送新消息，显示所有实例按钮
@@ -132,7 +133,8 @@ tgchannel/
 │   ├── session-store.ts      # 管理已注册的 Claude 实例
 │   └── socket-server.ts      # Unix socket 消息类型
 ├── client/
-│   ├── mcp.ts             # channel 或 tools-only Telegram MCP 工具
+│   ├── mcp.ts             # 传统 channel Telegram MCP 工具
+│   ├── agent-output.ts    # Agent SDK 最终输出到 Telegram reply 的转换
 │   ├── agent-runner.ts    # Agent SDK 会话、状态和控制 IPC
 │   ├── fish-launcher.ts   # Fish profile 解析与 Claude wrapper
 │   ├── my-claude.ts       # Agent SDK CLI
@@ -167,8 +169,8 @@ Center Manager 维护实例列表，按最后消息时间排序。
 4. 根据实例类型处理：
    - MCP：MCP server 发送 `notifications/claude/channel`
    - Agent SDK：Runner 将正文直接作为 `query()` 的 user prompt，并把 Telegram 元信息追加到 system prompt 末尾
-5. Claude 调用 Telegram MCP 的 `reply` 工具
-6. MCP server → Unix socket → Center Manager → Telegram
+5. Agent SDK Runner 或 MCP client 通过 Unix socket 发送回复
+6. Center Manager 将 Markdown 转成 Telegram HTML 后发送
 
 ### 4.4 切换机制
 
@@ -283,7 +285,7 @@ Center Manager 维护实例列表，按最后消息时间排序。
 4. 创建 `client/mcp.ts`
    - 连接 Center Manager unix socket
    - 发送注册消息
-   - 接收 forward 消息并转发 MCP 通知，或交给 Agent SDK Runner
+   - 接收 forward 消息并转发 MCP 通知；Agent SDK 消息由 `agent-runner.ts` 处理
    - 接收 switch 消息更新状态
    - 处理 `reply` 工具调用，发送回复到 socket
 
@@ -343,13 +345,14 @@ Center Manager 维护实例列表，按最后消息时间排序。
    - `fish-launcher.ts` - 加载用户 Fish 配置、解析 profile 并启动自定义命令
    - `my-claude.ts` - Agent SDK 实例入口
    - `reset-session.ts` - reset_session IPC 测试入口
-   - `mcp.ts` - 支持 channel 与 tools-only 两种模式
+   - `mcp.ts` - 支持传统 channel 模式
+   - `agent-output.ts` - 构造 Agent SDK 的 Telegram Markdown 回复
    - `.mcp.json` - 项目配置
 
 ### 当前限制
 
 1. `my-claude` 重启后不会自动恢复上一次 Runner 的 session ID；旧 session 文件仍保留，但需要显式恢复。
-2. Agent SDK 使用 `strictMcpConfig: true`，只加载显式提供的 tools-only `tgchannel` MCP，不加载其他 `.mcp.json` 或插件 MCP。
+2. Agent SDK 不显式挂载当前插件的 Telegram MCP；Claude 默认 MCP 加载行为保持不变。最终普通文本通过 Unix socket 发送给 Center Manager，由 Center Manager 负责 Telegram 格式转换。
 3. `/status` 的 token 是当前 Runner 生命周期内累计值，不是历史 session 文件的全量统计。
 4. 完整 Telegram 集成测试仍待补充。
 
@@ -395,7 +398,7 @@ my-claude claude-deepseek
 my-claude claude-aliyun
 ```
 
-Fish function 会在 Runner 启动时解析，实际 Claude 子进程在收到第一条 Telegram 消息时由 Agent SDK 启动。Agent SDK 使用 Claude Code 默认 system prompt，并加载 `user`、`project`、`local` 设置源及 `CLAUDE.md`；同时只加载显式配置的 tools-only `tgchannel` MCP。
+Fish function 会在 Runner 启动时解析，实际 Claude 子进程在收到第一条 Telegram 消息时由 Agent SDK 启动。Agent SDK 使用 Claude Code 默认 system prompt，并加载 `user`、`project`、`local` 设置源及 `CLAUDE.md`；最终文本由 Runner 通过 Unix socket 发送到 Center Manager。
 
 ---
 
@@ -406,3 +409,4 @@ Fish function 会在 Runner 启动时解析，实际 Claude 子进程在收到�
 - 2026-04-14：修复 NetSocket 类型，添加 switch skill
 - 2026-04-14：确认设计 - center 单实例，client 无状态，/switch 在 TG 内切换
 - 2026-08-06：完成 MCP 与 Agent SDK 双实例架构，加入 Fish profile、`/clear`、`/status` 和 token 统计
+- 2026-08-06：Agent SDK 改为不挂载 MCP，最终输出直接通过 Center Manager 转换为 Telegram 格式

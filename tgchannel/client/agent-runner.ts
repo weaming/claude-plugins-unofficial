@@ -5,9 +5,9 @@ import { createConnection, type Socket } from 'net'
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
-import { basename, dirname, join } from 'path'
-import { fileURLToPath } from 'url'
+import { basename, join } from 'path'
 import { createFishLauncher, resolveFishCommand, type FishLauncher } from './fish-launcher.js'
+import { createTelegramReply, getFinalOutput } from './agent-output.js'
 
 type ForwardMessage = {
   type: 'forward'
@@ -47,10 +47,6 @@ type AgentRunnerConfig = {
 
 const DEFAULT_SOCKET_PATH = process.env.TGCHANNEL_SOCKET_PATH
   ?? join(homedir(), '.claude', 'channels', 'tgchannel', 'center.sock')
-const CLIENT_DIR = dirname(fileURLToPath(import.meta.url))
-const MCP_SCRIPT_PATH = join(CLIENT_DIR, 'mcp.ts')
-const MCP_PACKAGE_ROOT = join(CLIENT_DIR, '..')
-const MCP_COMMAND = process.env.TGCHANNEL_BUN ?? 'bun'
 const OUTPUT_PREVIEW_CHAR_LIMIT = 200
 
 function log(...args: unknown[]): void {
@@ -75,32 +71,6 @@ function formatOutputStats(output: string): string {
     `output_preview_chars=${Array.from(preview).length}`,
     `output_preview=${JSON.stringify(preview)}`,
   ].join(' ')
-}
-
-function getMcpServerEnvironment(sessionId: string): Record<string, string> {
-  return {
-    TGCHANNEL_MODE: 'tools',
-    TGCHANNEL_SESSION_ID: sessionId,
-    ...(process.env.TGCHANNEL_SOCKET_PATH
-      ? { TGCHANNEL_SOCKET_PATH: process.env.TGCHANNEL_SOCKET_PATH }
-      : {}),
-  }
-}
-
-function buildMcpServer(sessionId: string): NonNullable<Options['mcpServers']>[string] {
-  return {
-    command: MCP_COMMAND,
-    args: [
-      'run',
-      '--cwd',
-      MCP_PACKAGE_ROOT,
-      '--shell=bun',
-      '--silent',
-      MCP_SCRIPT_PATH,
-    ],
-    env: getMcpServerEnvironment(sessionId),
-    alwaysLoad: true,
-  }
 }
 
 class AgentRunner {
@@ -334,20 +304,14 @@ class AgentRunner {
         const output = data.trim()
         if (output) stderrOutput.push(output)
       },
-      mcpServers: {
-        tgchannel: buildMcpServer(this.sessionId),
-      },
-      strictMcpConfig: true,
       settingSources: ['user', 'project', 'local'],
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
         append: [
           '你正在通过 Telegram 与用户交互。',
-          '用户看不到终端输出，必须调用 tgchannel MCP 的 reply 工具发送最终回复。',
-          'reply 工具的 chat_id 必须使用当前 Telegram 消息元信息中的 chat_id。',
-          '不要只输出普通文本作为最终回复。',
-          `当前 Telegram 消息元信息（仅用于调用 tgchannel 工具）：${JSON.stringify(message.meta)}`,
+          '请将最终答案直接作为普通文本输出；不要依赖当前 Telegram channel 插件的回复工具。',
+          `当前 Telegram 消息元信息（仅用于理解上下文）：${JSON.stringify(message.meta)}`,
         ].join('\n'),
       },
       ...(this.claudeSessionId ? { resume: this.claudeSessionId } : {}),
@@ -372,12 +336,14 @@ class AgentRunner {
         if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
           resultOutput = sdkMessage.result
           this.addUsage(sdkMessage.usage)
-          const output = resultOutput || assistantOutput.join('')
+          const output = getFinalOutput(resultOutput, assistantOutput.join(''))
+          this.sendTelegramReply(message, output)
           log('query done', `session=${sdkMessage.session_id}`, formatOutputStats(output))
         }
         if (sdkMessage.type === 'result' && sdkMessage.is_error) {
           this.addUsage(sdkMessage.usage)
           const output = 'result' in sdkMessage ? sdkMessage.result : assistantOutput.join('')
+          this.sendTelegramReply(message, output)
           log('query failed:', formatOutputStats(output), 'error=', 'result' in sdkMessage ? sdkMessage.result : sdkMessage.errors.join('; '))
         }
       }
@@ -392,6 +358,21 @@ class AgentRunner {
         this.activeQuery = null
       }
     }
+  }
+
+  private sendTelegramReply(message: ForwardMessage, output: string): void {
+    const reply = createTelegramReply(this.sessionId, message, output)
+    if (!reply) {
+      log('query output not sent: missing chat_id or empty output')
+      return
+    }
+
+    this.send({
+      type: 'update_last_message',
+      sessionId: this.sessionId,
+      message: reply.text.slice(0, 50),
+    })
+    this.send(reply)
   }
 
   private updateSessionId(message: SDKMessage): void {

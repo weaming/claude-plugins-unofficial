@@ -28,7 +28,7 @@ Telegram ←→ Center Manager ←→ Claude Client(s)
                     ↑
               Unix Socket
 
-Center Manager tracks both `mcp` and `agent-sdk` instances. Agent SDK instances use the existing Telegram MCP tools for replies, reactions, edits, and attachments.
+Center Manager tracks both `mcp` and `agent-sdk` instances. Agent SDK instances send their final Markdown output directly to Center Manager, which converts it to Telegram HTML.
 ```
 
 ## Installation
@@ -47,7 +47,7 @@ bun build --compile --minify --target bun --sourcemap=none \
     --outfile ~/.bun/bin/tgchannel-server server/index.ts
 ```
 
-Install the Agent SDK CLI entry points as source-backed launchers. `my-claude` needs access to the bundled `client/mcp.ts` file at runtime:
+Install the Agent SDK CLI entry points as source-backed launchers:
 
 ```fish
 mkdir -p ~/.bun/bin

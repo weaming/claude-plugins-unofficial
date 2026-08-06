@@ -513,7 +513,14 @@ if (!toolsOnly) {
         input_preview: z.string(),
       }),
     }),
-    async ({ params }) => {
+    async ({ params }: {
+      params: {
+        request_id: string
+        tool_name: string
+        description: string
+        input_preview: string
+      }
+    }) => {
       send({
         type: 'permission_request',
         request_id: params.request_id,
