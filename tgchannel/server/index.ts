@@ -1467,10 +1467,10 @@ void (async () => {
       onStart: info => {
         log('bot polling as @' + info.username)
         bot.api.setMyCommands([
-          { command: 'start', description: '欢迎信息' },
+          { command: 'start', description: '启动' },
           { command: 'switch', description: '切换 Claude 实例' },
           { command: 'status', description: '查看当前实例状态' },
-          { command: 'clear', description: '重置当前 Agent SDK 会话' },
+          { command: 'clear', description: '清空当前 Agent 会话历史' },
         ], { scope: { type: 'all_private_chats' } }).catch(() => {})
       },
     })
