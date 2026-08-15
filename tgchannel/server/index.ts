@@ -310,6 +310,67 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
   return ids
 }
 
+const progressMessageIds = new Map<string, number[]>()
+const progressQueues = new Map<string, Promise<void>>()
+
+function getProgressKey(sessionId: string, chatId: string): string {
+  return `${sessionId}:${chatId}`
+}
+
+function enqueueProgressTask(key: string, task: () => Promise<void>): Promise<void> {
+  const previous = progressQueues.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(task)
+  progressQueues.set(key, next)
+  void next.finally(() => {
+    if (progressQueues.get(key) === next) progressQueues.delete(key)
+  }).catch(() => {})
+  return next
+}
+
+async function updateProgressMessage(sessionId: string, chatId: string, text: string): Promise<void> {
+  const key = getProgressKey(sessionId, chatId)
+  const progressText = text.length > MAX_CHUNK_LIMIT
+    ? `${text.slice(0, MAX_CHUNK_LIMIT - 1)}…`
+    : text
+  const existingIds = progressMessageIds.get(key)
+
+  if (existingIds?.[0]) {
+    const rawApi = bot.api.raw as unknown as {
+      editMessageText: (params: Record<string, unknown>) => Promise<unknown>
+    }
+    try {
+      await rawApi.editMessageText({
+        chat_id: chatId,
+        message_id: existingIds[0],
+        rich_message: {
+          markdown: convertMarkdownToRichMarkdown(progressText),
+        },
+      })
+      return
+    } catch (error) {
+      log('progress edit error, sending a new message:', error)
+      progressMessageIds.delete(key)
+    }
+  }
+
+  const ids = await sendReply(chatId, progressText)
+  if (ids.length > 0) {
+    progressMessageIds.set(key, ids)
+  }
+}
+
+async function clearProgressMessage(sessionId: string, chatId: string): Promise<void> {
+  const key = getProgressKey(sessionId, chatId)
+  const ids = progressMessageIds.get(key) ?? []
+  progressMessageIds.delete(key)
+
+  for (const messageId of ids) {
+    await bot.api.deleteMessage(chatId, messageId).catch(error => {
+      log('progress delete error:', error)
+    })
+  }
+}
+
 // --- Session store ---
 const store = new SessionStore()
 const ACTIVE_STATE_FILE = join(BASE_DIR, 'active.json')
@@ -708,10 +769,33 @@ async function handleSocketMessage(
     case 'reply': {
       const chat_id = msg.chat_id
       const text = msg.text
-      void sendReply(chat_id, text, msg.reply_to, msg.files, msg.format).then(ids => {
+      void (async () => {
+        await enqueueProgressTask(
+          getProgressKey(msg.sessionId, chat_id),
+          () => clearProgressMessage(msg.sessionId, chat_id),
+        )
+        const ids = await sendReply(chat_id, text, msg.reply_to, msg.files, msg.format)
         log('reply sent to', chat_id, 'ids:', ids.join(','))
-      }).catch(err => {
+      })().catch(err => {
         log('reply error:', err)
+      })
+      break
+    }
+    case 'progress': {
+      void enqueueProgressTask(
+        getProgressKey(msg.sessionId, msg.chat_id),
+        () => updateProgressMessage(msg.sessionId, msg.chat_id, msg.text),
+      ).catch(err => {
+        log('progress error:', err)
+      })
+      break
+    }
+    case 'clear_progress': {
+      void enqueueProgressTask(
+        getProgressKey(msg.sessionId, msg.chat_id),
+        () => clearProgressMessage(msg.sessionId, msg.chat_id),
+      ).catch(err => {
+        log('progress clear error:', err)
       })
       break
     }

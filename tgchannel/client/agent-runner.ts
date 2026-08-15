@@ -62,6 +62,38 @@ function extractAssistantText(message: SDKMessage): string {
     .join('')
 }
 
+function extractToolCalls(message: SDKMessage): string[] {
+  if (message.type !== 'assistant') return []
+
+  return message.message.content
+    .filter(content => content.type === 'tool_use' && typeof content.name === 'string')
+    .map(content => {
+      if (content.type !== 'tool_use') return ''
+      const input = content.input
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length === 0) {
+        return `🔧 ${content.name}`
+      }
+
+      const argumentsText = Object.entries(input)
+        .map(([name, value]) => `${name}=${formatToolValue(value)}`)
+        .join(' ')
+      return argumentsText ? `🔧 ${content.name} ${argumentsText}` : `🔧 ${content.name}`
+    })
+    .filter(Boolean)
+}
+
+function formatToolValue(value: unknown): string {
+  if (typeof value === 'string') {
+    if (value.length === 0 || /\s/.test(value)) {
+      return `\`${value.replaceAll('`', '\\`')}\``
+    }
+    return value
+  }
+  if (value === null) return 'null'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 function formatOutputStats(output: string): string {
   const characters = Array.from(output)
   const preview = characters.slice(0, OUTPUT_PREVIEW_CHAR_LIMIT).join('')
@@ -326,6 +358,9 @@ class AgentRunner {
     try {
       for await (const sdkMessage of currentQuery) {
         this.updateSessionId(sdkMessage)
+        for (const toolCall of extractToolCalls(sdkMessage)) {
+          this.sendTelegramProgress(message, toolCall)
+        }
         const assistantText = extractAssistantText(sdkMessage)
         if (assistantText) assistantOutput.push(assistantText)
 
@@ -354,6 +389,14 @@ class AgentRunner {
         : error
       log(errorLabel, formatOutputStats(resultOutput || assistantOutput.join('')), errorDetails)
     } finally {
+      const chatId = message.meta.chat_id?.trim()
+      if (chatId) {
+        this.send({
+          type: 'clear_progress',
+          sessionId: this.sessionId,
+          chat_id: chatId,
+        })
+      }
       if (this.activeQuery === currentQuery) {
         this.activeQuery = null
       }
@@ -373,6 +416,18 @@ class AgentRunner {
       message: reply.text.slice(0, 50),
     })
     this.send(reply)
+  }
+
+  private sendTelegramProgress(message: ForwardMessage, text: string): void {
+    const chatId = message.meta.chat_id?.trim()
+    if (!chatId || !text) return
+
+    this.send({
+      type: 'progress',
+      sessionId: this.sessionId,
+      chat_id: chatId,
+      text,
+    })
   }
 
   private updateSessionId(message: SDKMessage): void {

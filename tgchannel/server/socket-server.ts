@@ -12,6 +12,8 @@ export type SocketMessage =
   | { type: 'update_session'; sessionId: string; claudeSessionId: string | null }
   | { type: 'forward'; sessionId?: string; content: string; meta: Record<string, string> }
   | { type: 'reply'; sessionId: string; chat_id: string; text: string; reply_to?: string; files?: string[]; format?: string }
+  | { type: 'progress'; sessionId: string; chat_id: string; text: string }
+  | { type: 'clear_progress'; sessionId: string; chat_id: string }
   | { type: 'react'; sessionId: string; chat_id: string; message_id: string; emoji: string }
   | { type: 'edit_message'; sessionId: string; chat_id: string; message_id: string; text: string; format?: string }
   | { type: 'download_attachment'; sessionId: string; file_id: string; corrId?: string }
