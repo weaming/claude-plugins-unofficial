@@ -30,7 +30,7 @@ my-plugin/
 1. **MCP 服务器（stdio）**：MCP 服务器作为子进程启动，通过 stdin/stdout 使用 JSON-RPC 通信。
 2. **传统 MCP 实例**：通过 `notifications/claude/channel` 将外部事件注入 Claude 会话，消息可带 channel 元信息。
 3. **Agent SDK 实例**：Agent SDK 直接调用 Claude Code `query()`；Telegram 正文作为普通 user prompt，`chat_id` 等元信息放入 system prompt 末尾。
-4. **回复格式**：Agent SDK Runner 将 query 的最终普通文本通过 Unix socket 发送给 Center Manager；Center Manager 负责 Markdown 到 Telegram HTML 的转换。
+4. **回复格式**：Agent SDK Runner 将 query 的最终普通文本通过 Unix socket 发送给 Center Manager；Center Manager 负责 Markdown 到 Telegram Rich Markdown 的转换。
 5. **MCP 工具调用**：传统 MCP 实例仍通过 Telegram MCP 工具发送回复、反应、编辑消息和下载附件。
 
 ### 关键文件
@@ -170,7 +170,7 @@ Center Manager 维护实例列表，按最后消息时间排序。
    - MCP：MCP server 发送 `notifications/claude/channel`
    - Agent SDK：Runner 将正文直接作为 `query()` 的 user prompt，并把 Telegram 元信息追加到 system prompt 末尾
 5. Agent SDK Runner 或 MCP client 通过 Unix socket 发送回复
-6. Center Manager 将 Markdown 转成 Telegram HTML 后发送
+6. Center Manager 将 Markdown 转成 Telegram Rich Markdown 后发送
 
 ### 4.4 切换机制
 
@@ -352,7 +352,7 @@ Center Manager 维护实例列表，按最后消息时间排序。
 ### 当前限制
 
 1. `my-claude` 重启后不会自动恢复上一次 Runner 的 session ID；旧 session 文件仍保留，但需要显式恢复。
-2. Agent SDK 不显式挂载当前插件的 Telegram MCP；Claude 默认 MCP 加载行为保持不变。最终普通文本通过 Unix socket 发送给 Center Manager，由 Center Manager 负责 Telegram 格式转换。
+2. Agent SDK 不显式挂载当前插件的 Telegram MCP；Claude 默认 MCP 加载行为保持不变。最终普通文本通过 Unix socket 发送给 Center Manager，由 Center Manager 负责 Telegram Rich Markdown 转换。
 3. `/status` 的 token 是当前 Runner 生命周期内累计值，不是历史 session 文件的全量统计。
 4. 完整 Telegram 集成测试仍待补充。
 

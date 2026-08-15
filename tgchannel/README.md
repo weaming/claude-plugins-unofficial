@@ -1,10 +1,10 @@
 # Telegram Unofficial Plugin
 
-Telegram channel plugin for Claude Code with Markdown to HTML conversion and multi-instance support.
+Telegram channel plugin for Claude Code with Telegram Rich Markdown and multi-instance support.
 
 ## Features
 
-- **Markdown to HTML auto-conversion** - Messages are automatically formatted as Telegram-friendly HTML
+- **Rich Markdown auto-conversion** - Messages are automatically sent with Telegram Rich Markdown
 - **Nested list bullets** - `●` / `○` / `▪` for visual hierarchy
 - **Multi-instance support** - Connect multiple Claude CLI instances and switch between them via Telegram buttons
 - **Agent SDK instances** - Run `my-claude` instances alongside channel-based Claude CLI instances
@@ -28,7 +28,7 @@ Telegram ←→ Center Manager ←→ Claude Client(s)
                     ↑
               Unix Socket
 
-Center Manager tracks both `mcp` and `agent-sdk` instances. Agent SDK instances send their final Markdown output directly to Center Manager, which converts it to Telegram HTML.
+Center Manager tracks both `mcp` and `agent-sdk` instances. Agent SDK instances send their final Markdown output directly to Center Manager, which converts it to Telegram Rich Markdown.
 ```
 
 ## Installation
