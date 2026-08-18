@@ -303,7 +303,14 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
   if (body) {
     const chunks = chunkText(body, MAX_CHUNK_LIMIT)
     for (let i = 0; i < chunks.length; i++) {
-      ids.push(await sendRichReply(chat_id, chunks[i], i === 0 ? reply_to : undefined))
+      if (format === 'plain') {
+        const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+          ...(i === 0 && reply_to ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
+        })
+        ids.push(sent.message_id)
+      } else {
+        ids.push(await sendRichReply(chat_id, chunks[i], i === 0 ? reply_to : undefined))
+      }
     }
   }
 
@@ -335,17 +342,8 @@ async function updateProgressMessage(sessionId: string, chatId: string, text: st
   const existingIds = progressMessageIds.get(key)
 
   if (existingIds?.[0]) {
-    const rawApi = bot.api.raw as unknown as {
-      editMessageText: (params: Record<string, unknown>) => Promise<unknown>
-    }
     try {
-      await rawApi.editMessageText({
-        chat_id: chatId,
-        message_id: existingIds[0],
-        rich_message: {
-          markdown: convertMarkdownToRichMarkdown(progressText),
-        },
-      })
+      await bot.api.editMessageText(chatId, existingIds[0], progressText)
       return
     } catch (error) {
       log('progress edit error, sending a new message:', error)
@@ -353,7 +351,7 @@ async function updateProgressMessage(sessionId: string, chatId: string, text: st
     }
   }
 
-  const ids = await sendReply(chatId, progressText)
+  const ids = await sendReply(chatId, progressText, undefined, undefined, 'plain')
   if (ids.length > 0) {
     progressMessageIds.set(key, ids)
   }

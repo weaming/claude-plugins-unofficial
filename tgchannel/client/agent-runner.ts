@@ -87,11 +87,11 @@ function extractToolCalls(message: SDKMessage): string[] {
 function formatToolValue(value: unknown): string {
   if (typeof value === 'string') {
     if (value.length > MAX_TOOL_ARGUMENT_CHARS) {
-      const preview = value.slice(0, MAX_TOOL_ARGUMENT_PREVIEW_CHARS).replaceAll('`', '\\`')
+      const preview = value.slice(0, MAX_TOOL_ARGUMENT_PREVIEW_CHARS)
       return `\`${preview}…\` (共 ${value.length} 字符)`
     }
     if (value.length === 0 || /\s/.test(value)) {
-      return `\`${value.replaceAll('`', '\\`')}\``
+      return `\`${value}\``
     }
     return value
   }
