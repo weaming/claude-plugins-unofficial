@@ -48,6 +48,8 @@ type AgentRunnerConfig = {
 const DEFAULT_SOCKET_PATH = process.env.TGCHANNEL_SOCKET_PATH
   ?? join(homedir(), '.claude', 'channels', 'tgchannel', 'center.sock')
 const OUTPUT_PREVIEW_CHAR_LIMIT = 200
+const MAX_TOOL_ARGUMENT_CHARS = 200
+const MAX_TOOL_ARGUMENT_PREVIEW_CHARS = 120
 
 function log(...args: unknown[]): void {
   process.stderr.write(`${new Date().toISOString()} ${args.join(' ')}\n`)
@@ -84,13 +86,23 @@ function extractToolCalls(message: SDKMessage): string[] {
 
 function formatToolValue(value: unknown): string {
   if (typeof value === 'string') {
+    if (value.length > MAX_TOOL_ARGUMENT_CHARS) {
+      const preview = value.slice(0, MAX_TOOL_ARGUMENT_PREVIEW_CHARS).replaceAll('`', '\\`')
+      return `\`${preview}…\` (共 ${value.length} 字符)`
+    }
     if (value.length === 0 || /\s/.test(value)) {
       return `\`${value.replaceAll('`', '\\`')}\``
     }
     return value
   }
   if (value === null) return 'null'
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (typeof value === 'object') {
+    const json = JSON.stringify(value)
+    if (json.length > MAX_TOOL_ARGUMENT_CHARS) {
+      return `\`${json.slice(0, MAX_TOOL_ARGUMENT_PREVIEW_CHARS)}…\` (共 ${json.length} 字符)`
+    }
+    return json
+  }
   return String(value)
 }
 
